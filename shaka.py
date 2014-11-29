@@ -1,6 +1,7 @@
 import socket
 import json
 import sys, traceback
+import redis
 
 class http_parser:
     def __init__(self, sfhttp, is_client = True):
@@ -321,6 +322,7 @@ class sftap_http:
         self._state = self.__HEADER
 
         self._http = {}
+        self._redis = redis.Redis()
 
     def run(self):
         while True:
@@ -341,7 +343,10 @@ class sftap_http:
                   header['hop'])
         if flowid in self._http:
             self._http[flowid][2] = True
-            print(content, client_ip, client_port, server_ip, server_port)
+            msg = 'VOPEN %s %s %s %s' % (client_ip, client_port,
+                                         server_ip, server_port)
+            self._redis.rpush('http', msg)
+            print(msg)
 
     def _parse(self):
         while True:
@@ -356,9 +361,9 @@ class sftap_http:
                     self._state = self.__DATA
                 elif self._header['event'] == 'CREATED':
                     flowid = self._get_id()
-                    self._http[flowid] = [http_parser(self, is_client = True),
-                                          http_parser(self, is_client = False),
-                                          False]
+                    c = http_parser(self, is_client = True)
+                    s = http_parser(self, is_client = False)
+                    self._http[flowid] = [c, s, False, False]
                 elif self._header['event'] == 'DESTROYED':
                     try:
                         flowid = self._get_id()
@@ -366,8 +371,15 @@ class sftap_http:
                         s = self._http[flowid][1]
 
                         if self._http[flowid][2] == True:
-                            print('CLOSED', s._peer_ip, s._peer_port,
-                                  s._ip, s._port)
+                            msg = 'VCLOSE %s %s %s %s' % (c._ip, c._port,
+                                                          s._ip, s._port)
+                            self._redis.rpush('http', msg)
+                            print(msg)
+                            
+                        msg = 'CLOSE %s %s %s %s' % (c._ip, c._port,
+                                                     s._ip, s._port)
+                        self._redis.rpush('http', msg)
+                        print(msg)
 
                         del self._http[flowid]
                     except KeyError:
@@ -384,7 +396,16 @@ class sftap_http:
                 if flowid in self._http:
                     if self._header['match'] == 'up':
                         # client
-                        self._http[flowid][0].in_data(buf, self._header)
+                        c = self._http[flowid][0]
+                        c.in_data(buf, self._header)
+
+                        if self._http[flowid][3] == False:
+                            msg = 'OPEN %s %s %s %s' % (c._ip, c._port,
+                                                        c._peer_ip,
+                                                        c._peer_port)
+                            self._redis.rpush('http', msg)
+                            print(msg)
+                            self._http[flowid][3] = True
                     elif self._header['match'] == 'down':
                         # server
                         self._http[flowid][1].in_data(buf, self._header)
